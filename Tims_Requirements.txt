@@ -1,0 +1,17 @@
+What to look for to evaluate Tim's picks
+
+Individual
+- Goals that season
+- Goals in past 5 games
+- What line they play on
+- Do they play powerplay
+	- 1st or 2nd line
+
+Team Based
+- Teams record in the last 10
+- Teams ranking in goals for
+- Team PowerPlay percentage
+
+- Opposing teams record in last 10
+- Opposing teams record in goals against
+- Opposing teams PK percentage
