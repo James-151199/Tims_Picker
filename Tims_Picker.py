@@ -1,9 +1,7 @@
-import re
-import yaml
-from datetime import datetime, date
-import math
+from datetime import datetime
 import json
-import sys
+
+import pandas as pd
 
 #Useful to see what takes the longest in the code
 import cProfile
@@ -11,7 +9,13 @@ import cProfile
 #Actual NHL packages
 from nhlpy.nhl_client import NHLClient
 from nhldata import moneypuck
-from bs4 import BeautifulSoup
+
+#Testing web scraping
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 #1 for preseason, #2 for regular, #3 for playoffs
 PLAYOFFS = 3
@@ -26,9 +30,10 @@ moneypuck = moneypuck.Connector()
 
 class TimsPlayer:
 
-    def __init__(self,name,id):
+    def __init__(self,name,id, round):
         self.name = name
         self.id = id
+        self.round = round
         self.gamesplayed = 0
         self.goals = 0           #No. of goals this season
         self.goalspast5 = 0      #No. of goals in their past 5 games
@@ -80,15 +85,33 @@ def get_player_ids():
     #Set up a list of players for the Tims picks
     TimsPlayers = []
 
-    with open('Tims_Picks.txt', 'r') as f:
-        player_names = f.read().splitlines()
-    
-    #Find the player ids for the players and associate them
-    #to their respective objects
-    for player_name in player_names:
-        playerid = get_player_id(player_name)
-        if playerid != 0:
-            TimsPlayers.append(TimsPlayer(player_name, playerid))        
+    url = "https://hockeychallengehelper.com"
+
+    options = Options()
+    options.add_argument('--headless')
+
+    driver = webdriver.Chrome(options=options)
+    driver.get(url)
+
+    wait = WebDriverWait(driver, 10)
+    player_link = wait.until(
+        EC.presence_of_element_located((By.XPATH, '//div[contains(@class, "player-name")]//a'))
+    )
+
+    player_elements = driver.find_elements(By.CLASS_NAME, "player-name")
+
+    round = 0
+    for player in player_elements:
+        try:
+            anchor = player.find_element(By.TAG_NAME, "a")
+            name = anchor.text
+            playerid = anchor.get_attribute("href")[27:]
+            TimsPlayers.append(TimsPlayer(name,playerid,round))
+            #print(f"Player: {name} | Link: {playerid} | Round: {round}")
+        except:
+            round += 1
+
+    driver.quit()
 
     return TimsPlayers
 
@@ -241,9 +264,12 @@ def get_advanced(Tims_Players):
 
     return(Tims_Players)
 
+print("Getting Player ids...")   
 #Get the players ids from the file
 Tims_Players = get_player_ids()
+print("Player IDs Acquired!")
 
+print("Getting Player stats...")  
 #Get the players stats
 Tims_Players = get_player_stats(Tims_Players)
 
@@ -252,7 +278,9 @@ Tims_Players = get_team_stats(Tims_Players)
 
 #Get the players xgoals past 5 games
 Tims_Players = get_advanced(Tims_Players)
+print("Player stats Acquired!")
 
+print("Calculating Scoring Likelihood...")  
 for skater in Tims_Players:
     #The Formula
     try:
@@ -269,12 +297,35 @@ for skater in Tims_Players:
         print(vars(skater))
         print(vars(skater.opp))
         continue
-    
-#Sort the list by best tims score to worst    
-Tims_Players.sort(key=lambda skater: skater.tims, reverse = True)
 
-for skater in Tims_Players:
+Tims_Players_Round_1 = []
+Tims_Players_Round_2 = []
+Tims_Players_Round_3 = []
+
+for player in Tims_Players:
+    if player.round == 1:
+        Tims_Players_Round_1.append(player)
+    elif player.round == 2:
+        Tims_Players_Round_2.append(player)
+    else:
+        Tims_Players_Round_3.append(player)
+
+#Sort the list by best tims score to worst    
+Tims_Players_Round_1.sort(key=lambda skater: skater.tims, reverse = True)
+Tims_Players_Round_2.sort(key=lambda skater: skater.tims, reverse = True)
+Tims_Players_Round_3.sort(key=lambda skater: skater.tims, reverse = True)
+
+print("\n\nROUND #1\n")
+for skater in Tims_Players_Round_1:
     #Print the Skater and the Tims Goal probability to 3 decimal points
     print(skater.name,"%.3f"%skater.tims, skater.goals, skater.goalspast5, skater.gamesplayed)
 
-    #print(skater.name, skater.goals, skater.goalspast5, skater.gamesplayed)
+print("\n\nROUND #2\n")
+for skater in Tims_Players_Round_2:
+    #Print the Skater and the Tims Goal probability to 3 decimal points
+    print(skater.name,"%.3f"%skater.tims, skater.goals, skater.goalspast5, skater.gamesplayed)
+
+print("\n\nROUND #3\n")
+for skater in Tims_Players_Round_3:
+    #Print the Skater and the Tims Goal probability to 3 decimal points
+    print(skater.name,"%.3f"%skater.tims, skater.goals, skater.goalspast5, skater.gamesplayed)
