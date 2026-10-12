@@ -1,0 +1,6 @@
+__pycache__/
+ghostdriver.log
+
+# Downloaded data and trained models - rebuilt by train_model.py
+data/
+models/
