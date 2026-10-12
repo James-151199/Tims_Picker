@@ -1,0 +1,46 @@
+Tim's Picks backtest on real Tim's lists - generated 2026-10-12
+2,001 lists over 3 seasons (23-24, 24-25, 25-26). Each season's models were trained only on earlier seasons.
+Hit rate = the list's top-ranked player scored. Top 3 = any of the top 3 scored.
+List AUC = chance a scorer is ranked above a non-scorer in the same list.
+
+                            hit rate   top 3  list AUC   vs goals/game (95% interval)
+Gradient boosting              29.0%   58.4%     0.634   -0.3% (-2.2% to +1.6%)
+LambdaRank                     28.1%   56.1%     0.612   -1.1% (-3.2% to +1.1%)
+Bayesian talent                29.3%   59.2%     0.627   +0.0% (-1.8% to +1.9%)
+GBM + goals/game blend         30.0%   58.1%     0.626   +0.7% (-0.6% to +2.2%)
+Goals per game                 29.3%   56.6%     0.609
+Random                         16.5%
+
+Hit rate by season:
+        Gradient boosting  LambdaRank  Bayesian talent  GBM + goals/game blend  Goals per game
+season                                                                                        
+23-24               25.6%       23.6%            25.4%                   27.4%           26.4%
+24-25               30.8%       29.2%            31.5%                   31.7%           29.8%
+25-26               30.8%       32.1%            31.1%                   31.1%           31.9%
+
+Hit rate by list:
+      Gradient boosting  LambdaRank  Bayesian talent  GBM + goals/game blend  Goals per game
+list                                                                                        
+1                 36.9%       37.2%            38.1%                   38.7%           37.8%
+2                 27.7%       26.4%            28.6%                   27.9%           27.0%
+3                 22.3%       20.8%            21.1%                   23.5%           23.1%
+
+Used by Tims_Picker.py: GBM + goals/game blend (best hit rate)
+Bayesian model (25-26): chance-rate half-life 50 games, prior 3.6 games (F 0.084 / D 0.088 xG per game); finishing half-life 100 games, prior 10 xG; opponent +0.72, goalie -0.53, home +0.10
+
+Top inputs for ranking within a list (gradient boosting, drop in list AUC x1000):
+  xG / game, weighted recent                  42.6
+  xG / game, last 82                          11.9
+  Defenceman or forward                        7.5
+  PP ice time, last 5                          4.4
+  Goals / game, season                         2.6
+  Shots / game, season                         2.6
+  Opponent xG against, last 20                 2.2
+  Ice time, last 5                             2.1
+  Line / pair                                  1.8
+  High-danger chances, last 20                 1.7
+  opp_win_pct_l40                              1.3
+  Career games                                 1.1
+  home                                         1.1
+  toi_l20                                      1.0
+  Shots x shooting %                           1.0
