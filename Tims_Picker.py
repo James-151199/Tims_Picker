@@ -1,331 +1,169 @@
-from datetime import datetime
+"""Tim's Picks helper - ranks today's Tim's Hockey Challenge players, list by
+list, using the method that won the backtest in train_model.py.
+
+    python Tims_Picker.py                  #today's Tim's lists
+    python Tims_Picker.py --all            #everyone playing today
+    python Tims_Picker.py --date 2026-10-14
+
+Uses tonight's projected lines and power play units for the Tim's players
+(from hockeychallengehelper.com) and the projected starting goalies (from
+dailyfaceoff.com) when they're available.
+"""
+import argparse
 import json
+import re
+import sys
+import unicodedata
+from datetime import date
 
+import joblib
 import pandas as pd
+import requests
 
-#Useful to see what takes the longest in the code
-import cProfile
+import tims_data
+import tims_features
+import tims_rank
+from train_model import METHODS, MODEL_FILE
 
-#Actual NHL packages
-from nhlpy.nhl_client import NHLClient
-from nhldata import moneypuck
-
-#Testing web scraping
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-
-#1 for preseason, #2 for regular, #3 for playoffs
-PLAYOFFS = 3
-
-#Season Key
-season = "20242025"
-
-#Remove SSL Verifcation, takes too damn long
-client = NHLClient(ssl_verify = False)
-
-moneypuck = moneypuck.Connector()
-
-class TimsPlayer:
-
-    def __init__(self,name,id, round):
-        self.name = name
-        self.id = id
-        self.round = round
-        self.gamesplayed = 0
-        self.goals = 0           #No. of goals this season
-        self.goalspast5 = 0      #No. of goals in their past 5 games
-        self.lineNo = 4          #Line they play on
-        self.PP = 0              #Are they on the power play (0 = no, 1 = 1st, 2 = 2nd)
-        self.tims = 0            #Tims Pick value - Likelyhood of scoring
-        self.shots = 0           #No. of shots this season
-        self.shotpctlast5 = 0    #Shooting Pct in the last 5 games
-        self.xgoals5 = 0         #xgoals past 5
-        self.ozpct = 0           #Off zone start percentage in last 5 games
-        self.toi = 0             #Time-On-Ice past 5
-
-        self.team = self.playerTeam() #Team of the player
-        self.opp  = self.oppTeam()    #Team the player is facing
-
-    class playerTeam:
-        def __init__(self):
-            self.name = ""
-            self.last10 = 0     #No. of wins in their last 10 games
-            self.goalsfor = 0   #No. of goals for on average
-            self.pprank = 0     #Power Play Rank
-            self.id = 0         #Team id
-
-    class oppTeam:
-        def __init__(self):
-            self.name = ""
-            self.last10 = 0     #No. of wins in their last 10 games
-            self.goalsagnst = 0 #No. of goals against on average
-            self.pkrank = 0     #Penalty Kill Rank
-            self.id = 0         #Team id
+BROWSER = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"}
 
 
-# Gets the player id for a player given their full name
-def get_player_id(player_name):
-    # Open the file
-    with open('NHL_DB.txt', 'r') as file:
-        json_obj = json.load(file)
-
-    # Return player id if name is found
-    for skater in json_obj:
-            if skater["name"] == player_name:
-                return skater["id"]
-            
-    return 0
-
-#Function to extract playerids from names
-def get_player_ids():
-
-    #Set up a list of players for the Tims picks
-    TimsPlayers = []
-
-    url = "https://hockeychallengehelper.com"
-
-    options = Options()
-    options.add_argument('--headless')
-
-    driver = webdriver.Chrome(options=options)
-    driver.get(url)
-
-    wait = WebDriverWait(driver, 10)
-    player_link = wait.until(
-        EC.presence_of_element_located((By.XPATH, '//div[contains(@class, "player-name")]//a'))
-    )
-
-    player_elements = driver.find_elements(By.CLASS_NAME, "player-name")
-
-    round = 0
-    for player in player_elements:
-        try:
-            anchor = player.find_element(By.TAG_NAME, "a")
-            name = anchor.text
-            playerid = anchor.get_attribute("href")[27:]
-            TimsPlayers.append(TimsPlayer(name,playerid,round))
-            #print(f"Player: {name} | Link: {playerid} | Round: {round}")
-        except:
-            round += 1
-
-    driver.quit()
-
-    return TimsPlayers
-
-def get_player_stats(Tims_Players):
-
-    #Find the stats for players in the last x games
-    for skater in Tims_Players:
-        try:
-            gamelog = client.stats.player_game_log(skater.id,season,PLAYOFFS)
-
-            goals = 0
-            lastfive = 0
-            gamesplayed = 0
-            shots = 0
-            slastfive = 0
-            toi = 0
-
-            #Find the total goals scored
-            for games in gamelog:
-                gamesplayed=gamesplayed+1
-                goals = games["goals"]+goals
-                shots = games["shots"]+shots
-
-            #Find the number of goals, shots and TOI for the player in the 
-            #last five games
-            for games in gamelog[:5]:
-                lastfive = games["goals"]+lastfive
-                slastfive = games["shots"]+slastfive
-                toi_raw = games["toi"].split(":")
-                toi = int(toi_raw[0])*60+int(toi_raw[1])+toi
-
-            #Find the team name
-            for games in gamelog[:1]:
-                skater.team.name = games["commonName"]["default"]
-
-            #Get skater TOI avg over the last 5 games
-            #Divide by 40 to get a value between 1 and 0
-            skater.toi   = toi/5/(40*60)
-
-            skater.shots = shots
-            skater.goals = goals
-            skater.goalspast5 = lastfive
-            skater.gamesplayed = gamesplayed
-            if slastfive != 0:
-                skater.shotpctlast5 = lastfive/slastfive
-
-        except KeyError:
-            print("Couldn't find :",skater.name)
-            pass
-
-    return Tims_Players
-
-def get_team_stats(Tims_Players):
-    #Retrieve the stats for all teams from NHL.com
-    #teamstats = client.stats.team_summary(start_season=season,end_season=season,game_type_id=PLAYOFFS)
-
-    q_params = {
-        "isAggregate": False,
-        "isGame": False,
-        "start": 0,
-        "limit": 50,
-        "factCayenneExp": "gamesPlayed>1",
-        "cayenneExp": "seasonId >= "+season,
-    }
-
-    teamstats = client.stats.client.get_by_url("https://api.nhle.com/stats/rest/en/team/summary", query_params=q_params).json()["data"]
-
-    #Find the players teams stats
-    for skater in Tims_Players:
-        for team in teamstats:
-            if skater.team.name in team["teamFullName"]:
-                skater.team.name = team["teamFullName"]
-                skater.team.goalsfor = team["goalsForPerGame"]
-                skater.team.pprank = team["powerPlayPct"]
-                skater.team.id = team["teamId"] 
-                break
-
-    #Retrieve the schedule of games today from NHL.com
-    schedule = client.schedule.get_schedule(datetime.today().strftime('%Y-%m-%d'))
+def get_tims_players():
+    """Today's Tim's lists, with each player's projected line and PP unit."""
+    j = requests.get("https://api.hockeychallengehelper.com/api/picks", headers=tims_data.TIMS_HEADERS,
+                     timeout=30).json()
+    rows = []
+    for lst in j.get("playerLists", []):
+        for p in lst["players"]:
+            line = re.search(r"\d", p.get("line") or "")
+            pp = re.search(r"\d", p.get("ppLine") or "")
+            rows.append({"list": lst["id"], "playerId": p["nhlPlayerId"], "name": p["fullName"],
+                         "line_override": int(line.group()) if line else None,
+                         "pp_override": int(pp.group()) if pp else 0})
+    return pd.DataFrame(rows)
 
 
-    #Find who the players team is playing that day
-    for skater in Tims_Players:
+def todays_skaters(day):
+    """Every skater on a roster of a team playing on the day, with their matchup."""
+    rows = []
+    for home, away, game_type in tims_data.todays_games(day):
+        for team, opp, home_road in [(home, away, "H"), (away, home, "R")]:
+            for pid, (name, pos) in tims_data.current_roster(team).items():
+                rows.append({"playerId": pid, "rosterName": name, "positionCode": pos, "team": team,
+                             "opp": opp, "homeRoad": home_road, "gameType": game_type})
+    return pd.DataFrame(rows)
 
-        #Search through the games to find the id of the opposing team
-        i=0
-        while i<12:
-            try:
-                if schedule["games"][i]["homeTeam"]["id"] == skater.team.id:
-                    skater.opp.id = schedule["games"][i]["awayTeam"]["id"]
-                    break
-                elif schedule["games"][i]["awayTeam"]["id"] == skater.team.id:
-                    skater.opp.id = schedule["games"][i]["homeTeam"]["id"]
-                    break
-                else:
-                    i+=1
-            except IndexError:
-                schedule = client.schedule.get_schedule(datetime.today().strftime('%Y-%m-%d'))
-                print(skater.name+" doesn't have any games today...")
-                break
 
-        #If the team isn't found -> pass
-        if i == 12:
-            pass
-        #Otherwise grab the other teams stats
-        else:
-            for team in teamstats:
-                if team["teamId"] == skater.opp.id:
-                    skater.opp.name = team["teamFullName"]
-                    skater.opp.goalsagnst = team["goalsAgainstPerGame"]
-                    skater.opp.pkrank = team["penaltyKillPct"]
-                    break
+def _plain(name):
+    return unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower().replace(".", "").strip()
 
-    #print(yaml.dump(schedule["gameWeek"][0]["games"][0],indent=4, default_flow_style=False))
 
-    #print(yaml.dump(client.schedule.get_schedule(datetime.today().strftime('%Y-%m-%d')),indent=4, default_flow_style=False))
+def starting_goalies(day, data):
+    """{team abbreviation: (goalie id, status)} for tonight's starters.
 
-    return Tims_Players
+    Projected starters come from DailyFaceoff. Any team it doesn't cover gets
+    the goalie who started most of their last 10 games.
+    """
+    goalies, teams = data["goalies"], data["teams"]
+    recent = goalies[goalies["season"] >= goalies["season"].max() - 10001]
+    by_name = {(_plain(n), t): pid for n, t, pid in recent[["name", "team", "playerId"]].itertuples(index=False)}
+    by_name.update({_plain(n): pid for n, pid in recent[["name", "playerId"]].itertuples(index=False)})
+    abbrev = dict(teams.drop_duplicates("teamFullName", keep="last")[["teamFullName", "team"]].values)
 
-#Get the xgoals for a player
-def get_advanced(Tims_Players):
-    for skater in Tims_Players:
-        data = moneypuck.player_by_game(skater.id,"skaters","regular")
-
-        no_games = 0
-        xgoals = 0
-        oz_start = 0
-        dz_start = 0
-        oz_pct = 0
-
-        for i in range(len(data)-1,0,-1):
-            #Find which data is for all situations
-            if data[i]["situation"] == "all":
-                    #Only get past 5 games
-                    if no_games < 5:
-                        no_games = no_games+1
-
-                        #get off_zone start pct in past 5
-                        oz_start = float(data[i]["I_F_oZoneShiftStarts"])
-                        dz_start = float(data[i]["I_F_dZoneShiftStarts"])    
-                        if oz_start != 0:     
-                            oz_pct = oz_pct+oz_start/(oz_start+dz_start)
-
-                        #Get xgoals in past 5
-                        xgoals = float(data[i]["I_F_xGoals"])+xgoals
-
-        #Average the stats per 5 games
-        skater.ozpct = oz_pct/5
-        skater.xgoals5 = xgoals/5
-
-    return(Tims_Players)
-
-print("Getting Player ids...")   
-#Get the players ids from the file
-Tims_Players = get_player_ids()
-print("Player IDs Acquired!")
-
-print("Getting Player stats...")  
-#Get the players stats
-Tims_Players = get_player_stats(Tims_Players)
-
-#Get the players and opposing teams stats
-Tims_Players = get_team_stats(Tims_Players)
-
-#Get the players xgoals past 5 games
-Tims_Players = get_advanced(Tims_Players)
-print("Player stats Acquired!")
-
-print("Calculating Scoring Likelihood...")  
-for skater in Tims_Players:
-    #The Formula
+    out = {}
     try:
-        if skater.gamesplayed != 0:
-            skater.tims = 0.5*skater.team.goalsfor+2*skater.opp.goalsagnst+3*skater.goals/skater.gamesplayed+3*skater.goalspast5/5+skater.shots/skater.gamesplayed
-            if skater.toi != 0:
-                skater.tims = skater.tims+0.1*skater.toi
-            if skater.ozpct != 0:
-                skater.tims = skater.tims+4*skater.ozpct
-            if skater.goalspast5 != 0:
-                skater.tims = skater.tims+0.25/skater.shotpctlast5*skater.goalspast5+2*skater.xgoals5
-    except ZeroDivisionError:
-        print(skater.name+" has a stat == 0")
-        print(vars(skater))
-        print(vars(skater.opp))
-        continue
+        html = requests.get(f"https://www.dailyfaceoff.com/starting-goalies/{day}", headers=BROWSER, timeout=30).text
+        games = json.loads(re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S).group(1))
+        for g in games["props"]["pageProps"]["data"]:
+            for side in ("home", "away"):
+                team = abbrev.get(g[f"{side}TeamName"])
+                name = _plain(g.get(f"{side}GoalieName") or "")
+                pid = by_name.get((name, team)) or by_name.get(name)
+                if team and pid:
+                    out[team] = (pid, g.get(f"{side}NewsStrengthName") or "Unconfirmed")
+    except (requests.RequestException, AttributeError, KeyError, ValueError) as e:
+        print(f"  Couldn't get projected starting goalies ({e}), using recent starters")
 
-Tims_Players_Round_1 = []
-Tims_Players_Round_2 = []
-Tims_Players_Round_3 = []
+    last10 = goalies[goalies["started"] == 1].sort_values("gameDate").groupby("team").tail(10)
+    for team, pid in last10.groupby("team")["playerId"].agg(lambda s: s.value_counts().idxmax()).items():
+        out.setdefault(team, (pid, "Recent starter"))
+    return out
 
-for player in Tims_Players:
-    if player.round == 1:
-        Tims_Players_Round_1.append(player)
-    elif player.round == 2:
-        Tims_Players_Round_2.append(player)
+
+def predict(targets, day, by):
+    bundle = joblib.load(MODEL_FILE)
+    season = tims_data.current_season(day)
+    #Two seasons back covers every feature (82 game windows + last season)
+    data = tims_features.load_all(season - 20002)
+
+    starters = starting_goalies(day, data)
+    targets = targets.assign(gameDate=pd.Timestamp(day), season=season)
+    targets["opp_goalie"] = targets["opp"].map(lambda t: starters.get(t, (None, ""))[0])
+    targets["goalie_status"] = targets["opp"].map(lambda t: starters.get(t, (None, ""))[1])
+    names = {pid: n for pid, n in data["goalies"][["playerId", "name"]].itertuples(index=False)}
+    targets["goalie_name"] = targets["opp_goalie"].map(names)
+
+    df = tims_features.build_features(targets, data)
+    #Skip players with no NHL history (call-ups making their debut)
+    df = df[df["career_gp"].notna()].copy()
+    feats = bundle["features"]
+    df["gbm"] = bundle["gbm"].predict_proba(df[feats])[:, 1]
+    df["lambdarank"] = bundle["lambdarank"].predict(df[feats])
+    df["bayes"] = bundle["bayes"].predict(df)
+    df = tims_rank.add_blend(df, by=by)
+    return df, bundle["deploy"]
+
+
+def show(df, deploy, title):
+    print(f"\n{title}   (ranked by {METHODS[deploy]})\n")
+    print(f"{'#':>2} {'Player':23}{'Team':>5}{'Opp':>6}{'P(goal)':>9}{'G':>4}{'GP':>4}{'xG/GP':>7}"
+          f"{'Line':>6}{'PP':>4}   Opposing goalie")
+    for i, (_, p) in enumerate(df.sort_values(deploy, ascending=False).iterrows(), start=1):
+        line = f"{'D' if p['positionCode'] == 'D' else 'F'}{p['line']:.0f}" if pd.notna(p["line"]) else "-"
+        pp = f"PP{p['pp_unit']:.0f}" if p["pp_unit"] else "-"
+        goalie = f"{p['goalie_name']} ({p['goalie_status']})" if pd.notna(p.get("goalie_name")) else "unknown"
+        print(f"{i:>2} {p['name'][:22]:23}{p['team']:>5}{('@' if p['homeRoad'] == 'R' else '') + p['opp']:>6}"
+              f"{p['gbm']:>9.1%}{p['season_goals']:>4.0f}{p['season_gp']:>4.0f}{p['ixg_l20']:>7.2f}"
+              f"{line:>6}{pp:>4}   {goalie}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", type=date.fromisoformat, default=date.today())
+    parser.add_argument("--all", action="store_true", help="rank every skater playing, not just the Tim's players")
+    parser.add_argument("--top", type=int, default=30, help="how many players to show with --all")
+    args = parser.parse_args()
+
+    if not MODEL_FILE.exists():
+        sys.exit("No model found - run 'python train_model.py' first.")
+    sys.stdout.reconfigure(encoding="utf-8")
+
+    print("Getting today's games and rosters...")
+    playing = todays_skaters(args.date)
+    if playing.empty:
+        sys.exit(f"No NHL games on {args.date}.")
+
+    if args.all:
+        targets, by = playing.assign(name=playing["rosterName"], list=0), ("gameDate",)
     else:
-        Tims_Players_Round_3.append(player)
+        print("Getting Tim's lists...")
+        tims = get_tims_players()
+        if tims.empty:
+            sys.exit("Couldn't find any Tim's lists - try --all to rank everyone playing.")
+        missing = tims[~tims["playerId"].isin(playing["playerId"])]
+        for name in missing["name"]:
+            print(f"  {name} isn't on a roster playing today, skipping")
+        targets, by = tims.merge(playing, on="playerId"), ("gameDate", "list")
 
-#Sort the list by best tims score to worst    
-Tims_Players_Round_1.sort(key=lambda skater: skater.tims, reverse = True)
-Tims_Players_Round_2.sort(key=lambda skater: skater.tims, reverse = True)
-Tims_Players_Round_3.sort(key=lambda skater: skater.tims, reverse = True)
+    print("Loading stats and predicting...")
+    df, deploy = predict(targets, args.date, by)
 
-print("\n\nROUND #1\n")
-for skater in Tims_Players_Round_1:
-    #Print the Skater and the Tims Goal probability to 3 decimal points
-    print(skater.name,"%.3f"%skater.tims, skater.goals, skater.goalspast5, skater.gamesplayed)
+    if args.all:
+        show(df.nlargest(args.top, deploy), deploy, f"TOP {args.top} - {args.date}")
+    else:
+        for l in sorted(df["list"].unique()):
+            show(df[df["list"] == l], deploy, f"LIST #{l}")
 
-print("\n\nROUND #2\n")
-for skater in Tims_Players_Round_2:
-    #Print the Skater and the Tims Goal probability to 3 decimal points
-    print(skater.name,"%.3f"%skater.tims, skater.goals, skater.goalspast5, skater.gamesplayed)
 
-print("\n\nROUND #3\n")
-for skater in Tims_Players_Round_3:
-    #Print the Skater and the Tims Goal probability to 3 decimal points
-    print(skater.name,"%.3f"%skater.tims, skater.goals, skater.goalspast5, skater.gamesplayed)
+if __name__ == "__main__":
+    main()
